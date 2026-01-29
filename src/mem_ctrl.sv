@@ -6,7 +6,8 @@
 `default_nettype none
 
 module mem_ctrl #(
-  parameter int WIDTH_P = 32
+  parameter int WIDTH_P = 32,
+  parameter int ADDR_WIDTH = 9
 )(
 
   `ifdef USE_POWER_PINS
@@ -17,7 +18,7 @@ module mem_ctrl #(
   input wire                 ACLK,
   input wire                 ARESETN,
 
-  //Read Address Channel wire
+  ////Read Address Channel wire
   input wire [WIDTH_P-1:0]   S_ARADDR,
   input wire                 S_ARVALID,
 
@@ -33,7 +34,7 @@ module mem_ctrl #(
   input wire [3:0]           S_WSTRB,
   input wire                 S_WVALID,
 
-  //Write Response Channel  wire
+  //Write Response Channel  wireS
   input wire                 S_BREADY,
 
   //Read Address Channel OUTPUTS
@@ -54,31 +55,42 @@ module mem_ctrl #(
 
 );
 
+  localparam int ExtraBits = ADDR_WIDTH - 9;
+  localparam int SramCount = 1 << ExtraBits;
+
+
   logic [7:0] sram_data_in;
   logic [7:0] sram_data_out;
-  logic [7:0] sram_addr;
-  logic [7:0] sram_bitmask;
-  logic [0:0] sram_gwen;
+  logic [ExtraBits + 8:0] sram_addr;
+  logic write_en;
 
-  gf180mcu_fd_ip_sram__sram512x8m8wm1 sram_0 (
+  generate
+    for (i = 0; i < SramCount; i = i + 1) begin: gen_srams
+      gf180mcu_fd_ip_sram__sram512x8m8wm1 sram_0 (
 
-      `ifdef USE_POWER_PINS
-        .VDD  (VDD),
-        .VSS  (VSS),
-      `endif
+          `ifdef USE_POWER_PINS
+            .VDD  (VDD),
+            .VSS  (VSS),
+          `endif
 
-      .CLK  (ACLK), // clock
-      .CEN  (1'b0), // mem enable (active low)
-      .GWEN (sram_gwen), // write enable: 0 == write, 1 == read (active low)
-      .WEN  (sram_bitmask), // write bitbask (active low)
-      .A    (sram_addr),   // address
-      .D    (sram_data_in),   // data input bus
-      .Q    (sram_data_out) // data output bus
-  );
+          .CLK  (ACLK), // clock
+          .CEN  (sram_addr[9 + ExtraBits:9] != i[9 + ExtraBits:9]), // mem enable (active low)
+          .GWEN (write_en), // write enable: 0 == write, 1 == read (active low)
+          .WEN  (8'b0), // write bitbask (active low)
+          .A    (sram_addr[8:0]),   // address
+          .D    (sram_data_in),   // data input bus
+          .Q    (sram_data_out) // data output bus
+      );
+    end
+  endgenerate
+
 
   always_comb begin
+    if (ARVALID && RREADY) begin
+    end   
 
   end
+
 
 endmodule
 
