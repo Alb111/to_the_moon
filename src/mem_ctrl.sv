@@ -2,11 +2,11 @@
 // input and outputs was based of the defenition provided in the following:
 // https://www.realdigital.org/doc/a9fee931f7a172423e1ba73f66ca4081
 // https://github.com/arhamhashmi01/Axi4-lite/blob/main/Axi4-lite-verilator/axi4_lite_slave.sv
- 
+
 `default_nettype none
 
 module mem_ctrl #(
-  parameter WIDTH_P = 32
+  parameter int WIDTH_P = 32
 )(
 
   `ifdef USE_POWER_PINS
@@ -14,10 +14,10 @@ module mem_ctrl #(
     inout  wire VSS,
   `endif
 
-  input wire                           ACLK,
-  input wire                           ARESETN,
+  input wire                 ACLK,
+  input wire                 ARESETN,
 
-  ////Read Address Channel wire
+  //Read Address Channel wire
   input wire [WIDTH_P-1:0]   S_ARADDR,
   input wire                 S_ARVALID,
 
@@ -33,7 +33,7 @@ module mem_ctrl #(
   input wire [3:0]           S_WSTRB,
   input wire                 S_WVALID,
 
-  //Write Response Channel  wireS
+  //Write Response Channel  wire
   input wire                 S_BREADY,
 
   //Read Address Channel OUTPUTS
@@ -53,6 +53,32 @@ module mem_ctrl #(
   output                     S_BVALID
 
 );
+
+  logic [7:0] sram_data_in;
+  logic [7:0] sram_data_out;
+  logic [7:0] sram_addr;
+  logic [7:0] sram_bitmask;
+  logic [0:0] sram_gwen;
+
+  gf180mcu_fd_ip_sram__sram512x8m8wm1 sram_0 (
+
+      `ifdef USE_POWER_PINS
+        .VDD  (VDD),
+        .VSS  (VSS),
+      `endif
+
+      .CLK  (ACLK), // clock
+      .CEN  (1'b0), // mem enable (active low)
+      .GWEN (sram_gwen), // write enable: 0 == write, 1 == read (active low)
+      .WEN  (sram_bitmask), // write bitbask (active low)
+      .A    (sram_addr),   // address
+      .D    (sram_data_in),   // data input bus
+      .Q    (sram_data_out) // data output bus
+  );
+
+  always_comb begin
+
+  end
 
 endmodule
 
