@@ -1,102 +1,191 @@
-module boot_fsm (
-    input logic clk,
-    input logic reset_n,
+module boot_fsm #(
+    parameter BOOT_SIZE = 32,
+    parameter SRAM_BASE_ADDR = 32'h0000_0000
+)(
+    input logic clk_i,
+    input logic reset_i,
 
     output logic spi_start_o,
-    output logic [7:0] spi_tx_i,
-    input logic [7:0] spi_rx_i,
+    output logic [7:0] spi_out_o,
+    input logic [7:0] spi_in_i,
     input logic spi_done_i,
+    input logic spi_busy_i,
+    output logic flash_csb_o
 
-    output logic cores_run_o
+    output logic cores_en_o,
+    output logic boot_done_o
+
+    output logic sram_wr_en_o,
+    output logic [31:0] sram_addr_o,
+    output logic [31:0] sram_data_o
+
 );
 
     typedef enum logic [3:0] {
-        RESET,
-        CMD,
-        ADDR0,
-        ADDR1,
-        ADDR2,
-        READ0,
-        READ1,
-        READ2,
-        READ3,
+        IDLE,
+        SEND_CMD,
+        WAIT_CMD,
+        SEND_ADDR,
+        WAIT_ADDR,
+        READ_BYTE,
+        WAIT_BYTE,
+        WRITE_SRAM,
         DONE
     } boot_states;
 
     boot_state curr_state, next_state;
-    logic [31:0] word_buf;
+    logic [31:0] word_buffer;  //collects 4 bytes
+    logic [1:0]  byte_in_word;  // which byte in word (0-3)
+    logic [31:0] byte_cntr;   // total bytes read
+    logic [31:0] sram_addr;  // curr sram addr
+    logic [1:0]  addr_byte_cnt;   // count 3 address bytes
 
     //state register
-    always_ff @(posedge clk) begin
-        if (!reset_n) begin
-            curr_state <= RESET;
+    always_ff @(posedge clk_i) begin
+        if (reset_n) begin
+            curr_state <= IDLE;
         end else begin
             curr_state <= next_state;
         end
     end
 
+    // data path
+    always_ff @(posedge clk_i) begin
+        if(reset_i) begin
+            word_buffer <= 32'h0;
+            byte_in_word <= 2'd0;
+            byte_cntr <= 32'h0;
+            sram_addr <= SRAM_BASE_ADDR;
+            addr_byte_cnt <= 2'd0;
+        end else begin
+            case(curr_state)
+            WAIT_ADDR: begin
+                if(spi_done_i) begin
+                    addr_byte_cnt <= addr_byte_cnt + 1;
+                end
+            end
+
+            WAIT_BYTE: begin
+                if (spi_done_i) begin
+                    // store byte in correct position (little-endian)
+                    case(byte_in_word)
+                    2'd0: word_buffer[7:0] <= spi_in_i;
+                    2'd1: word_buffer[15:8] <= spi_in_i;
+                    2'd2: word_buffer[23:16] <= spi_in_i;
+                    2'd3: word_buffer[31:24] <= spi_in_i;
+                    endcase
+
+                    byte_in_word <= byte_in_word +1;
+                    byte_cntr <= byte_cntr +1;
+                end
+            end
+
+            WRITE_SRAM: begin
+                // after write, prepare for next word
+                sram_addr <= sram_addr + 4;
+                byte_in_word <= 2'd0;
+            end
+           
+            endcase
+        end
+
+    end
+
+
     //fsm
     always_comb begin
         next_state = curr_state;
         spi_start_o = 1'b0;
-        cores_run_o = 1'b0;
+        spi_out_o = 8'h00;
+        flash_csb_o = 1'b1;
+        sram_wr_en_o = 1'b0;
+        sram_addr_o = 32'h0;
+        sram_data_o = 32'h0;
+        cores_en_o = 1'b0;
+        boot_done_o = 1'b0;
+        
+        unique case(curr_state)
+            IDLE: begin
+                next_state = SEND_CMD;
+            end
 
-        case(curr_state)
-            RESET: next_state = CMD;
-
-            CMD: begin
-                spi_tx_i = 8'h03;
+            SEND_CMD: begin
+                flash_csb_o = 1'b0;
                 spi_start_o = 1'b1;
-                next_state = ADDR0;
+                spi_out_o = 8'h03;  // Read command
+                next_state = WAIT_CMD;
             end
 
-            ADDR0: if(spi_done_i) begin
-                spi_tx_i = 8'h00; 
+
+            WAIT_CMD: begin
+                flash_csb_o = 1'b0;
+                if (spi_done_i) begin
+                    next_state = SEND_ADDR;
+                end
+            end
+
+            SEND_ADDR: begin
+                flash_csb_o = 1'b0;
                 spi_start_o = 1'b1;
-                next_state = ADDR1;
+                spi_out_o = 8'h00;  // Address bytes are all 0x00
+                next_state = WAIT_ADDR;
             end
 
-            ADDR1: if(spi_done_i) begin
-                spi_tx_i = 8'h00; 
+            WAIT_ADDR: begin
+                flash_csb_o = 1'b0;
+                if (spi_done_i) begin
+                    if (addr_byte_cnt == 2'd2) begin
+                        // Sent all 3 address bytes
+                        next_state = READ_BYTE;
+                    end else begin
+                        // Send next address byte
+                        next_state = SEND_ADDR;
+                    end
+                end
+            end
+
+            READ_BYTE: begin
+                flash_csb_o = 1'b0;
                 spi_start_o = 1'b1;
-                next_state = ADDR2;
+                spi_data_out_o = 8'h00;
+                next_state = WAIT_BYTE;
             end
 
-            ADDR2: if(spi_done_i) begin
-                spi_tx_i = 8'h00; 
-                spi_start_o = 1'b1;
-                next_state = READ0;
+            WAIT_BYTE: begin
+                flash_csb_o = 1'b0;
+                if (spi_done_i) begin
+                    if (byte_in_word == 2'd3) begin
+                        // Got 4th byte, time to write
+                        next_state = WRITE_SRAM;
+                    end else begin
+                        // Need more bytes
+                        next_state = READ_BYTE;
+                    end
+                end
             end
 
-            READ0: if(spi_done_i) begin
-                next_state = READ1;
-            end
-
-            READ1: if(spi_done_i) begin
-                next_state = READ2;
-            end
-
-            READ2: if(spi_done_i) begin
-                next_state = READ3;
-            end
-
-            READ3: if(spi_done_i) begin
-                next_state = DONE;
+            WRITE_SRAM: begin
+                flash_csb_o = 1'b0;
+                sram_wr_en_o = 1'b1;
+                sram_addr_o = sram_addr;
+                sram_data_o = word_buffer;
+           
+                if (byte_counter >= BOOT_SIZE) begin
+                    next_state = DONE;
+                end else begin
+                    next_state = READ_BYTE;
+                end
             end
 
             DONE: begin
-                cores_run_o = 1'b1;
+                flash_csb_o = 1'b1;  // Deselect flash
+                cores_en_o = 1'b1;
+                boot_done_o = 1'b1;
+                next_state = DONE;   // Stay here
             end
+            
+            default: next_state = IDLE;
         endcase
     end
-
-    // capture data
-    always_ff @(posedge clk) begin
-        if (curr_state == READ0 && spi_done_i) word_buf[7:0] <= spi_rx_i;
-        if (curr_state == READ1 && spi_done_i) word_buf[15:8] <= spi_rx_i;
-        if (curr_state == READ2 && spi_done_i) word_buf[23:16] <= spi_rx_i;
-        if (curr_state == READ3 && spi_done_i) word_buf[31:24] <= spi_rx_i;
-    end
 endmodule
-
 
