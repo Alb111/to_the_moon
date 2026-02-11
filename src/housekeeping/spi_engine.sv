@@ -1,23 +1,24 @@
 module spi_engine (
-    input logic clk,
-    input logic reset_n,
+    input logic clk_i,
+    input logic reset_i,
 
     input logic start_i,
-    input logic [7:0] tx_byte_i,
-    input logic [7:0] rx_byte_i,
+    input logic [7:0] data_in_i,
+    output logic [7:0] data_out_o,
     output logic byte_done_o,
+    output logic busy_o,
 
     //spi pins
-    output logic spi_sck,
-    output logic spi_mosi,
-    input logic spi_miso,
-    output logic spi_csb
+    output logic spi_sck_o,
+    output logic spi_mosi_o,
+    input logic spi_miso_i,
+    output logic spi_csb_o
 );
-    typedef enum logic [1:0] {IDLE, SHIFT, DONE} spi_state_t;
+    typedef enum logic [1:0] {IDLE, SHIFT} spi_state_t;
 
     spi_state_t curr_state, next_state;
 
-    logic [7:0] tx_shift, rx_shift;
+    logic [7:0] shift_out, shift_in;
     logic [2:0] bit_cnt;
 
 
@@ -25,14 +26,9 @@ module spi_engine (
     logic [2:0] div;
     logic sck_en;
 
-    //shift logic
-    logic [7:0] shifter_tx;
-    logic [7:0] shifter_rx;
-    logic [2:0] bit_cnt;
-
     //state reg
-    always_ff @(posedge clk) begin
-        if(!reset_n) begin
+    always_ff @(posedge clk_i) begin
+        if(!reset_i) begin
             curr_state <= IDLE;
         end else begin
             curr_state <= next_state;
@@ -43,53 +39,60 @@ module spi_engine (
         next_state = curr_state;
         spi_csb = 1'b1;
         spi_sck = 1'b0;
-        spi_mosi = 1'b0;
+        //spi_mosi = 1'b0;
         byte_done_o = 1'b0;
+        busy_o = 1'b0;
 
-        case(curr_state)
+        unique case(curr_state)
             IDLE: begin
                 if(start_i) begin
                     next_state = SHIFT;
                 end
             end
             SHIFT: begin
+                busy_o = 1'b1;
                 spi_csb = 1'b0;
-                spi_sck = clk;
-                spi_mosi = tx_shift[bit_cnt];
+                spi_sck = 1'b1;
+                //spi_mosi = tx_shift[bit_cnt];
 
-                if(bit_cnt == 0) begin
-                    next_state = DONE;
+                if(bit_cnt == 3'd7) begin
+                    byte_done_o = 1'b1;
+                    next_state = IDLE;
                 end
             end
 
-            DONE: begin
-                byte_done_o = 1'b1;
-                next_state = IDLE;
-            end
-
-            defailt: next_state = IDLE;
+            default: next_state = IDLE;
         endcase
     end
 
     //data path
     always_ff @(posedge clk) begin
-        if(!reset_n) begin
-            bit_cnt <= 3'd7;
-            tx_shift <= 0;
-            rx_shift <= 0;
+        if(reset_i) begin
+            bit_cnt <= 3'd0;
+            shift_out <= 8'h00;
+            shift_in <= 8'h00;
+            data_out_o <= 8'h00;
+            spi_mosi_o <= 1'b0;
         end else begin
-            if(curr_state == IDLE && start_i) begin
-                tx_shift <= tx_byte_i;
-                rx_shift <= 0;
-                bit_cnt <= 3'd7;
-            end else if(curr_state == SHIFT) begin
-                rx_shift[bit_cnt] <= spi_miso;
-                bit_cnt <= bit_cnt - 1;
-            end else if(curr_state == DONE) begin
-                rx_byte_i <= rx_shift;
+            case(curr_state)
+            IDLE: begin
+                if(start_i) begin
+                    shift_out <= data_in_i;
+                    bit_cnt <= 3'd0;
+                    spi_mosi_o <= data_in_i[7] //msb first
+                end
             end
-        end
-        
+            SHIFT: begin
+                shift_out <= {shift_out[6:0], 1'b0};
+                shift_in <= {shift_in[6:0], spi_miso_i};
+                spi_mosi_o <= shift_out[6];
+                bit_cnt <= bit_cnt +1;
+                if(curr_state == 3'd7) begin
+                    data_out_o <= {shift_in[6:0], spi_miso_i};
+                end
+            end
+            endcase
+        end 
     end
 
 
