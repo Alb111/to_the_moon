@@ -1,5 +1,5 @@
 module housekeeping_top #(
-    parameter BOOt_SIZE = 32,
+    parameter BOOT_SIZE = 32,
     parameter SRAM_BASE_ADDR = 32'h0000_0000
 )(
     input logic clk_i,
@@ -34,7 +34,7 @@ module housekeeping_top #(
       .start_i(spi_start),
       .data_in_i(spi_data_out),
       .data_out_o(spi_data_in),
-      .ready_o(spi_ready),
+      .done_o(spi_ready),
       .busy_o(spi_busy),
       .spi_sck_o(spi_sck_o),
       .spi_mosi_o(spi_mosi_o),
@@ -49,9 +49,9 @@ module housekeeping_top #(
       .clk_i(clk_i),
       .reset_i(reset_i),
       .spi_start_o(spi_start),
-      .spi_data_out_o(spi_data_out),
-      .spi_data_in_i(spi_data_in),
-      .spi_ready_i(spi_ready),
+      .spi_out_o(spi_data_out),
+      .spi_in_i(spi_data_in),
+      .spi_done_i(spi_ready),
       .spi_busy_i(spi_busy),
       .flash_csb_o(flash_csb_o),
       .sram_wr_en_o(sram_wr_en_o),
