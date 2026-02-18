@@ -17,7 +17,11 @@ module boot_fsm #(
 
     output logic sram_wr_en_o,
     output logic [31:0] sram_addr_o,
-    output logic [31:0] sram_data_o
+    output logic [31:0] sram_data_o,
+
+    //arbiter interface
+    output logic arb_req_o,
+    input  logic arb_gnt_i
 
 );
 
@@ -58,20 +62,20 @@ module boot_fsm #(
             sram_addr <= SRAM_BASE_ADDR;
             addr_byte_cnt <= 2'd0;
         end else begin
-            // Handle Address Counting
-            // if (curr_state == IDLE || curr_state == SEND_CMD) begin
+            // FIX: Use IDLE to reset your counters before a new boot starts
+            if (curr_state == IDLE) begin
+                byte_in_word <= 2'd0;
+                addr_byte_cnt <= 2'd0;
+                byte_cntr <= 32'h0;
+            end
+            // if (curr_state == WAIT_ADDR && curr_state == READ_BYTE) begin
             //     byte_in_word <= 2'd0;
             // end
-            // if (curr_state == WAIT_ADDR && spi_done_i) begin
-            //     addr_byte_cnt <= addr_byte_cnt + 1;
-            // end
-            if (curr_state == WAIT_ADDR && curr_state == READ_BYTE) begin
-                byte_in_word <= 2'd0;
-            end
 
             if (curr_state == WAIT_ADDR && spi_done_i) begin
                 addr_byte_cnt <= addr_byte_cnt + 1'b1;
             end
+            
             // byte assembly
             if (curr_state == WAIT_BYTE && spi_done_i) begin
                 case(byte_in_word)
@@ -84,57 +88,18 @@ module boot_fsm #(
                 byte_cntr <= byte_cntr + 1'b1;
             end
 
-            if (curr_state == WRITE_SRAM) begin
+            // We only reset byte_in_word AFTER the arbiter has granted the write
+            if (curr_state == WRITE_SRAM && arb_gnt_i) begin
                 byte_in_word <= 2'd0;
                 sram_addr <= sram_addr + 4;
             end
-            // Reset address counter when moving to READ_BYTE
-            // if (curr_state == READ_BYTE && next_state == WAIT_BYTE) begin
-            //      // Reset address counter once we are done with address phase
-            //      if (addr_byte_cnt == 2'd3) 
-            //         addr_byte_cnt <= 2'd0;
-            //end
+
+            // if (curr_state == WRITE_SRAM) begin
+            //     byte_in_word <= 2'd0;
+            //     sram_addr <= sram_addr + 4;
+            // end
         end
     end
-            // case(curr_state)
-            // WAIT_ADDR: begin
-            //     if(spi_done_i) begin
-            //         addr_byte_cnt <= addr_byte_cnt + 1;
-            //     end
-            // end
-
-            // WAIT_BYTE: begin
-            //     if (spi_done_i) begin
-            //         // store byte in correct position (little-endian)
-            //         case(byte_in_word)
-            //         2'd0: word_buffer[7:0] <= spi_in_i;
-            //         2'd1: word_buffer[15:8] <= spi_in_i;
-            //         2'd2: word_buffer[23:16] <= spi_in_i;
-            //         2'd3: word_buffer[31:24] <= spi_in_i;
-            //         endcase
-
-                    // if(byte_in_word == 2'd0) word_buffer[7:0] <= spi_in_i;
-                    // else if(byte_in_word == 2'd1) word_buffer[15:8] <= spi_in_i;
-                    // else if(byte_in_word == 2'd2)word_buffer[23:16] <= spi_in_i;
-                    // else if(byte_in_word == 2'd3) word_buffer[31:24] <= spi_in_i;
-
-    //                 byte_in_word <= byte_in_word + 1'b1;
-    //                 byte_cntr <= byte_cntr + 1'b1;
-    //                 // force state transition to make sure we dont double count
-    //             end
-    //         end
-
-    //         WRITE_SRAM: begin
-    //             // after write, prepare for next word
-    //             sram_addr <= sram_addr + 4;
-    //             byte_in_word <= 2'd0;
-    //         end
-    //         default: ; //do nothing
-    //         endcase
-    //     end
-
-    // end
-
 
     //fsm
     always_comb begin
@@ -147,6 +112,7 @@ module boot_fsm #(
         sram_data_o = word_buffer;
         cores_en_o = 1'b0;
         boot_done_o = 1'b0;
+        arb_req_o = 1'b0; // default is no request
         
         case(curr_state)
             IDLE: begin
@@ -211,14 +177,22 @@ module boot_fsm #(
 
             WRITE_SRAM: begin
                 flash_csb_o = 1'b0;
-                sram_wr_en_o = 1'b1;
+                //sram_wr_en_o = 1'b1;
+                arb_req_o   = 1'b1;  // signal to arbiter we want the bus
                 sram_addr_o = sram_addr;
                 sram_data_o = word_buffer;
-           
-                if (byte_cntr >= BOOT_SIZE) begin
-                    next_state = DONE;
+
+                if (arb_gnt_i) begin
+                    // Only pulse write enable if we are granted access
+                    sram_wr_en_o = 1'b1;
+                    if (byte_cntr >= BOOT_SIZE) begin
+                        next_state = DONE;
+                    end else begin
+                        next_state = READ_BYTE;
+                    end
                 end else begin
-                    next_state = READ_BYTE;
+                    // Wait in this state until arbiter says yes
+                    next_state = WRITE_SRAM;
                 end
             end
 
