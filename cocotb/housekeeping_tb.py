@@ -1,67 +1,119 @@
 import os
+import sys
 from pathlib import Path
 import cocotb
 from cocotb.clock import Clock
 from cocotb.triggers import RisingEdge, FallingEdge, ClockCycles
+import random
 
-@cocotb.test()
-async def test_simple_boot(dut):
-    """send 4 bytes, check SRAM write"""
-    
-    # start clock
-    cocotb.start_soon(Clock(dut.clk_i, 20, "ns").start())
-    
-    # reset
-    dut.reset_i.value = 1
-    dut.spi_miso_i.value = 0
-    await ClockCycles(dut.clk_i, 10)
-    dut.reset_i.value = 0
-    await ClockCycles(dut.clk_i, 5)
-    
-    dut._log.info("Starting Boot Sequence...")
-    
-    # 1. wait for comandn (1 byte) and addr (3 bytes) phase to complete
-    # total 32 rising edges of sck
+# --- PATH FIX ---
+current_dir = Path(__file__).resolve().parent
+emulation_path = current_dir.parent / "emulation" / "arbitration_cachecoh"
+sys.path.append(str(emulation_path))
+
+try:
+    from weighted_round_robin import WeightedRoundRobinArbiter
+except ImportError:
+    print(f"Error: Could not find weighted_round_robin.py in {emulation_path}")
+    sys.exit(1)
+
+# --- HELPER: FLASH MODEL ---
+async def flash_model(dut, data):
+    """Simulates a Flash chip bit-stream"""
+    # Wait for the Address Phase (32 bits) to finish
     for _ in range(32):
         await RisingEdge(dut.spi_sck_o)
     
-    dut._log.info("Address phase finished. Sending Flash Data...")
-
-    # 2. feed actual data
-    flash_data = [0xAA, 0xBB, 0xCC, 0xDD]
-    
-    for val in flash_data:
+    for byte in data:
         for i in range(8):
-            # drive miso on the falling edge so it's stable for the rising edge
             await FallingEdge(dut.spi_sck_o)
-            dut.spi_miso_i.value = (val >> (7-i)) & 1
-            
-        dut._log.info(f"Flash provided byte: {hex(val)}")
+            dut.spi_miso_i.value = (byte >> (7-i)) & 1
 
-    #3. wait for the srma write enable to pulse
-    await RisingEdge(dut.sram_wr_en_o)
+# --- TEST CASE ---
+@cocotb.test()
+async def test_boot_with_arbiter_contention(dut):
+    """Full Boot Test: 2 words with random Arbiter delays"""
     
-    await ClockCycles(dut.clk_i, 1)
+    cocotb.start_soon(Clock(dut.clk_i, 20, "ns").start())
     
-    actual = int(dut.sram_data_o.value)
-    expected = 0xDDCCBBAA # little-endian assembly
+    # Initialize Arbiter (Housekeeping is index 0)
+    weights = [1, 5] 
+    arbiter = WeightedRoundRobinArbiter(num_requesters=2, weights=weights)
     
-    dut._log.info(f"SRAM Wrote!!! Data: 0x{actual:08X}")
+    # Reset
+    dut.reset_i.value = 1
+    dut.arb_gnt_i.value = 0
+    dut.spi_miso_i.value = 0
+    await ClockCycles(dut.clk_i, 10)
+    dut.reset_i.value = 0
     
-    assert actual == expected, f"ERROR: Expected 0x{expected:08X}, got 0x{actual:08X}"
-    dut._log.info("success: boot fsm assembled word correctly!!!!!!!!!")
-
-if __name__ == "__main__":
-    from cocotb_tools.runner import get_runner
-    proj_path = Path(__file__).resolve().parent
-    sim = os.getenv("SIM", "icarus")
-    
-    sources = [
-        proj_path / "../src/housekeeping/spi_engine.sv",
-        proj_path / "../src/housekeeping/boot_fsm.sv",
-        proj_path / "../src/housekeeping/housekeeping_top.sv"
+    boot_data = [
+        0x11, 0x22, 0x33, 0x44, # Word 0
+        0x55, 0x66, 0x77, 0x88, # Word 1
+        0x99, 0xAA, 0xBB, 0xCC, # Word 2
+        0xDD, 0xEE, 0xFF, 0x00, # Word 3
+        0x12, 0x34, 0x56, 0x78, # Word 4
+        0x9A, 0xBC, 0xDE, 0xF0, # Word 5
+        0x11, 0x22, 0x33, 0x44, # Word 6
+        0x55, 0x66, 0x77, 0x88  # Word 7 (Total 32 bytes)
+    ]
+    expected_words = [
+        0x44332211, 0x88776655, 0xCCBBAA99, 0x00FFEEDD,
+        0x78563412, 0xF0DEBC9A, 0x44332211, 0x88776655
     ]
     
-    runner = get_runner(sim)
-    runner.build(sources=sources, hdl_toplevel="housekeeping_top", always=True, waves=True)
-    runner.test(hdl_toplevel="housekeeping_top", test_module="housekeeping_tb", waves=True)
+    cocotb.start_soon(flash_model(dut, boot_data))
+
+    words_captured = 0
+    while words_captured < len(expected_words):
+        # 1. Wait for Request
+        await RisingEdge(dut.arb_req_o)
+        
+        # 2. Simulate other things happening on the bus (Wait 1-10 cycles)
+        delay = random.randint(1, 10)
+        await ClockCycles(dut.clk_i, delay)
+        
+        # 3. Call Python Arbiter (pretending Core 1 isn't requesting)
+        # requests = [Housekeeping, Core1]
+        grant_result = arbiter.arbitrate([1, 0]) 
+        
+        if grant_result[0] == 1:
+            dut.arb_gnt_i.value = 1
+            # Wait for FSM to see grant and pulse write
+            await RisingEdge(dut.clk_i) 
+            
+            if dut.sram_wr_en_o.value == 1:
+                actual = int(dut.sram_data_o.value)
+                assert actual == expected_words[words_captured]
+                dut._log.info(f"✓ Word {words_captured} written: {hex(actual)}")
+                words_captured += 1
+            
+            await FallingEdge(dut.clk_i)
+            dut.arb_gnt_i.value = 0
+
+    await RisingEdge(dut.boot_done_o)
+    assert dut.cores_en_o.value == 1
+    dut._log.info("✓ SUCCESS: Boot Sequence Complete!")
+
+# --- THE RUNNER ---
+if __name__ == "__main__":
+    from cocotb_tools.runner import get_runner
+    
+    # Tell the runner where your Verilog files are
+    sources = [
+        current_dir / "../src/housekeeping/spi_engine.sv",
+        current_dir / "../src/housekeeping/boot_fsm.sv",
+        current_dir / "../src/housekeeping/housekeeping_top.sv"
+    ]
+    
+    runner = get_runner("icarus") # Or "verilator"
+    runner.build(
+        sources=sources,
+        hdl_toplevel="housekeeping_top",
+        always=True
+    )
+    runner.test(
+        hdl_toplevel="housekeeping_top",
+        test_module="housekeeping_tb", # Name of this python file
+        waves=True
+    )
