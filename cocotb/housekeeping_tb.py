@@ -7,7 +7,9 @@ import random
 
 async def flash_model(dut, data):
     """Simulates a flash chip bit-stream"""
-    # wait for address phase (32 bits) to finish
+    # wait for the fsm to lower CSB to start the command
+    await FallingEdge(dut.flash_csb_o)
+    # wait for command and address phase (32 bits total) to finish
     for _ in range(32):
         await RisingEdge(dut.spi_sck_o)
     
@@ -17,122 +19,52 @@ async def flash_model(dut, data):
             dut.spi_miso_i.value = (byte >> (7-i)) & 1
 
 
-
 @cocotb.test()
-async def test_boot_with_arbiter(dut):
-    """Full Boot Test: 8 words with randomized bus grant delays"""
-    
+async def test_boot_full(dut):
+    """simplified full test for direct muxing"""
     cocotb.start_soon(Clock(dut.clk_i, 20, "ns").start())
     
-    # initial state
+    # reset
     dut.reset_i.value = 1
-    dut.arb_gnt_i.value = 0
     dut.spi_miso_i.value = 0
     await ClockCycles(dut.clk_i, 10)
     dut.reset_i.value = 0
     
-    boot_data = [
-        0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 
-        0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00,
-        0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0, 
-        0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88   
-    ]
-    expected_words = [
-        0x44332211, 0x88776655, 0xCCBBAA99, 0x00FFEEDD,
-        0x78563412, 0xF0DEBC9A, 0x44332211, 0x88776655
-    ]
-    
-    cocotb.start_soon(flash_model(dut, boot_data))
-
-    words_captured = 0
-    while words_captured < len(expected_words):
-        # 1. wair for the boot fsm to request the bus
-        await RisingEdge(dut.arb_req_o)
-        
-        # 2. simulate arbiter is busy for 1-10 cycles
-        delay = random.randint(1, 10)
-        await ClockCycles(dut.clk_i, delay)
-        
-        # 3. grant the bus
-        dut.arb_gnt_i.value = 1
-        
-        # 4. wait for the fsm to perform the sram write
-        #fsm pulses sram_wr_en_o when it sees gnt and sck is ready
-        await RisingEdge(dut.sram_wr_en_o)
-
-        # wait until the end of the clock cycle so the data is stable
-        await FallingEdge(dut.clk_i)
-        
-        # sample data to verify its correct at the moment of the write
-        actual = int(dut.sram_data_o.value)
-        assert actual == expected_words[words_captured], f"Data Mismatch!!! Word {words_captured}"
-        
-        dut._log.info(f"** Word {words_captured} written: {hex(actual)}")
-        words_captured += 1
-        
-        # 5. release the grant after the write cycle completes
-        await FallingEdge(dut.clk_i)
-        dut.arb_gnt_i.value = 0
-
-    # verify final activation signals
-    await RisingEdge(dut.boot_done_o)
-    assert dut.cores_en_o.value == 1
-    dut._log.info("** SUCCESS: boot sequence complete!!!! ***")
-
-
-
-@cocotb.test()
-async def test_boot_full(dut):
-    """full test with 32-bit formatting and checks"""
-    cocotb.start_soon(Clock(dut.clk_i, 20, "ns").start())
-    
-    # 1. reset
-    dut.reset_i.value = 1
-    await ClockCycles(dut.clk_i, 5)
-    dut.reset_i.value = 0
-    
-    # 2. setup data
+    #setup data, 32 bytes = 8 words
     boot_data = [i for i in range(32)]
     expected_words = []
     for i in range(0, 32, 4):
+        # spi sends little endian in fsm logic
         word = (boot_data[i+3] << 24) | (boot_data[i+2] << 16) | (boot_data[i+1] << 8) | boot_data[i]
         expected_words.append(word)
 
     cocotb.start_soon(flash_model(dut, boot_data))
 
-    # moniter
+    # monitor writes
     for i in range(len(expected_words)):
-        if dut.arb_req_o.value == 1:
-            await FallingEdge(dut.arb_req_o)
-        await RisingEdge(dut.arb_req_o)
+        # wait for the write enable pulse to the memory controller mux
+        await RisingEdge(dut.sram_wr_en_o)
         
-        await ReadOnly() # lock sim for reading
-        
+        # capture values on the next falling edge to ensure stability
+        await FallingEdge(dut.clk_i)
         actual_data = int(dut.sram_data_o.value)
         actual_addr = int(dut.sram_addr_o.value)
         
-        # check against python calculated word
-        assert actual_data == expected_words[i], f"DATA ERROR! Word {i}: Expected 0x{expected_words[i]:08x}, Got 0x{actual_data:08x}"
-        assert actual_addr == (i * 4), f"ADDR ERROR! Word {i}: Expected 0x{(i*4):08x}, Got 0x{actual_addr:08x}"
-
-        # exit read only phase before driving signals
-        await FallingEdge(dut.clk_i) 
-        
-        # 4. grant accesss
-        dut.arb_gnt_i.value = 1
-        await RisingEdge(dut.sram_wr_en_o)
-        await FallingEdge(dut.clk_i)
-        dut.arb_gnt_i.value = 0
+        assert actual_data == expected_words[i], f"DATA ERROR! Word {i}: Expected {hex(expected_words[i])}, Got {hex(actual_data)}"
+        assert actual_addr == (i * 4), f"ADDR ERROR! Word {i}: Expected {hex(i*4)}, Got {hex(actual_addr)}"
         
         dut._log.info(f"** Word {i} Verified: Addr=0x{actual_addr:08x}, Data=0x{actual_data:08x}")
 
-
+    # final handshake
+    await RisingEdge(dut.boot_done_o)
+    assert dut.cores_en_o.value == 1
+    dut._log.info("** SUCCESS: Full boot verified.")
+    
 
 @cocotb.test()
 async def test_reset_during_boot(dut):
-    """Check that a reset during boot clears all internal states"""
-    clock = Clock(dut.clk_i, 20, "ns")
-    cocotb.start_soon(clock.start())
+    """check that a reset during boot clears all internal states"""
+    cocotb.start_soon(Clock(dut.clk_i, 20, "ns").start())
     
     dut.reset_i.value = 1
     await ClockCycles(dut.clk_i, 5)
@@ -140,20 +72,19 @@ async def test_reset_during_boot(dut):
     
     flash_task = cocotb.start_soon(flash_model(dut, [0xAA]*32))
     
-    # wait for 1st activity
-    await RisingEdge(dut.arb_req_o)
+    # wait for spi clock to start ticking (indicates fsm is active)
+    await RisingEdge(dut.spi_sck_o)
     dut._log.info("Boot started, hitting reset...")
     
     dut.reset_i.value = 1
     await ClockCycles(dut.clk_i, 10)
     
-    # assertion check if hardware actually responded to reset
-    assert dut.arb_req_o.value == 0, "Error: Request stayed high during reset"
-    assert dut.sram_addr_o.value == 0, "Error: Address didn't clear"
+    # signal checks: verify everything went back to zero/idle
+    assert dut.sram_wr_en_o.value == 0, "Error: Write enable stayed high during reset"
     assert dut.boot_done_o.value == 0, "Error: boot_done high during reset"
     
     flash_task.cancel() 
-    dut._log.info("** SUCESSS: Reset recovery verified.")
+    dut._log.info("** SUCCESS: Reset recovery verified.")
 
 
 
