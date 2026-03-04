@@ -20,7 +20,7 @@ When `pass_thru_en_i = 1`:
 * Internal SPI master signals are disabled.
 * External SPI signals (`ext_sck_i`, `ext_mosi_i`, `ext_csb_i`) are muxed directly to the flash pins.
 * Flash MISO is routed back to the external interface.
-* In this mode, the ASIC remains inactive while an external SPI master directly programs the flash.
+* In this mode, the chip remains inactive while an external SPI master directly programs the flash.
 
 When `pass_thru_en_i = 0`:
 * Normal boot mode resumes.
