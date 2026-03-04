@@ -8,7 +8,23 @@ The Bootloader subsystem is responsible for initializing the system SRAM with ex
 * **Word Assembly:** The controller retrieves 8-bit data packets and assembles them into 32-bit words using a **Little-Endian** format.
 * **System Control:** * `cores_en_o`: Held low during the boot process to keep the CPU cores in a reset state.
     * `boot_done_o`: Signals the completion of the transfer and acts as the selector for the Memory Controller mux.
-* **Bypass Path:** Muxed directly into the Memory Controller to ensure MSI Directory state remains clean during initialization.
+* **Path:** Muxed directly into the Memory Controller to ensure MSI Directory state remains clean during initialization.
+
+## Flash Reprogramming (Pass-Through Mode)
+The subsystem supports external flash reprogramming using a USB-to-SPI bridge IC.
+
+**Operation:**
+When `pass_thru_en_i = 1`:
+* Boot FSM and SPI Engine are held in reset.
+* Internal SPI master signals are disabled.
+* External SPI signals (`ext_sck_i`, `ext_mosi_i`, `ext_csb_i`) are muxed directly to the flash pins.
+* Flash MISO is routed back to the external interface.
+* In this mode, the ASIC remains inactive while an external SPI master directly programs the flash.
+
+When `pass_thru_en_i = 0`:
+* Normal boot mode resumes.
+* Boot controller reads flash and copies contents into SRAM.
+
 
 ## Module Descriptions
 
@@ -42,4 +58,6 @@ The subsystem is verified using a Cocotb testbench (`housekeeping_tb.py`) and an
 From the `cocotb` directory, run:
 ```bash
 python3 housekeeping_tb.py
+```
+
 
