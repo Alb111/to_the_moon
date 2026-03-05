@@ -6,24 +6,24 @@ The Bootloader subsystem is responsible for initializing the system SRAM with ex
 ## Technical Specifications
 * **Flash Interface:** Uses the SPI protocol (Mode 0) to communicate with external flash memory via the SPI Engine.
 * **Word Assembly:** The controller retrieves 8-bit data packets and assembles them into 32-bit words using a **Little-Endian** format.
-* **System Control:** * `cores_en_o`: Held low during the boot process to keep the CPU cores in a reset state.
+* **System Control:** `cores_en_o`: Held low during the boot process to keep the CPU cores in a reset state.
     * `boot_done_o`: Signals the completion of the transfer and acts as the selector for the Memory Controller mux.
 * **Path:** Muxed directly into the Memory Controller to ensure MSI Directory state remains clean during initialization.
 
 ## Flash Reprogramming (Pass-Through Mode)
-The subsystem supports external flash reprogramming using a USB-to-SPI bridge IC.
+The subsystem supports external flash reprogramming using an external SPI master (e.g. USB-to-SPI bridge). In this design, the flash pins are shared between the bootloader and the external programmer.
 
 **Operation:**
 
 When `pass_thru_en_i = 1`:
-* Boot FSM and SPI Engine are held in reset.
-* Internal SPI master signals are disabled.
-* External SPI signals (`ext_sck_i`, `ext_mosi_i`, `ext_csb_i`) are muxed directly to the flash pins.
-* Flash MISO is routed back to the external interface.
-* In this mode, the chip remains inactive while an external SPI master directly programs the flash.
+* Boot controller system is held in reset.
+* Internal SPI outputs (`spi_sck_o`, `spi_mosi_o`, `flash_csb_o`) are tri-stated.
+* An external SPI master can directly drive the flash pins (`SCK`, `MOSI`, `CSB`) and read from `MISO`.
+
+This allows the external SPI master to safely program the flash without conflicts with the internal bootloader logic.
 
 When `pass_thru_en_i = 0`:
-* Normal boot mode resumes.
+* Tri-state is removed and boot controller system becomes active.
 * Boot controller reads flash and copies contents into SRAM.
 
 
@@ -51,10 +51,13 @@ The top-level wrapper that integrates the SPI Engine and the Boot FSM, providing
 The subsystem is verified using a Cocotb testbench (`housekeeping_tb.py`) and an asynchronous Flash model.
 
 ### Test Suite
-* **`test_boot_full`**: Verifies a complete 32-byte transfer, ensuring every address and data word is correct.
-* **`test_reset_during_boot`**: Verifies that a hardware reset mid-process correctly clears all internal counters and stops SRAM writes.
-* **`test_short_boot_failure`**: A security/safety check to ensure CPU cores are never enabled if the SPI stream ends prematurely.
-
+* **test_reset_behavior:** Verifies that all outputs are held low while reset_i is asserted.
+* **test_full_boot_sequence:** Verifies a complete 32-byte boot, checking every SRAM address, data word, and the final `boot_done_o` / `cores_en_o handoff`.
+* **test_mux_boot_mode:** Verifies that the boot controller can talk to flash and complete a boot when `pass_thru_en_i = 0`.
+* **test_mux_passthrough_mode:** Verifies that the boot controller goes completely silent when `pass_thru_en_i = 1`.
+* **test_mid_boot_interrupt:** Verifies that asserting `pass_thru_en_i` mid-boot immediately stops all SRAM writes and prevents `boot_done_o` from firing.
+* **test_boot_after_passthrough:** Verifies that a clean boot completes correctly after reprogramming is complete and reset is applied.
+  
 ### How to Run Tests
 From the `cocotb` directory, run:
 ```bash
