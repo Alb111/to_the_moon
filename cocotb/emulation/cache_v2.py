@@ -17,6 +17,7 @@ class CacheLine:
     
     Fields:
         state: Current MSI state (INVALID, SHARED, or MODIFIED)
+
         data: Cached data value (32-bit word)
     
     Notes:
